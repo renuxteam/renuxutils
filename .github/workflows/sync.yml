@@ -1,0 +1,34 @@
+name: Sync Fork
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Executa diariamente à meia-noite (pode ajustar o agendamento)
+  workflow_dispatch: # Permite disparar manualmente
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Configurar o repositório
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Configurar Git com um usuário fictício
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Adicionar o repositório original como remoto
+      - name: Add Upstream
+        run: |
+          git remote add upstream https://github.com/REPO_ORIGINAL/REPO_NAME.git
+          git fetch upstream
+          git checkout main # Certifique-se de que o branch principal está correto (ex.: main ou master)
+
+      # Fazer o merge das mudanças do repositório original
+      - name: Merge Upstream Changes
+        run: |
+          git merge upstream/main --allow-unrelated-histories
+          git push origin main
