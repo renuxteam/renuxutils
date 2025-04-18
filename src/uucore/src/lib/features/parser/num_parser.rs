@@ -150,7 +150,7 @@ impl ExtendedParser for i64 {
             }
         }
 
-        match parse(input, true) {
+        match parse(input, ParseTarget::Integral, &[]) {
             Ok(v) => into_i64(v),
             Err(e) => Err(e.map(into_i64)),
         }
@@ -187,7 +187,7 @@ impl ExtendedParser for u64 {
             }
         }
 
-        match parse(input, true) {
+        match parse(input, ParseTarget::Integral, &[]) {
             Ok(v) => into_u64(v),
             Err(e) => Err(e.map(into_u64)),
         }
@@ -219,7 +219,7 @@ impl ExtendedParser for f64 {
             Ok(v)
         }
 
-        match parse(input, false) {
+        match parse(input, ParseTarget::Decimal, &[]) {
             Ok(v) => into_f64(v),
             Err(e) => Err(e.map(into_f64)),
         }
@@ -231,14 +231,15 @@ impl ExtendedParser for ExtendedBigDecimal {
     fn extended_parse(
         input: &str,
     ) -> Result<ExtendedBigDecimal, ExtendedParserError<'_, ExtendedBigDecimal>> {
-        parse(input, false)
+        parse(input, ParseTarget::Decimal, &[])
     }
 }
 
-fn parse_special_value(
-    input: &str,
+fn parse_special_value<'a>(
+    input: &'a str,
     negative: bool,
-) -> Result<ExtendedBigDecimal, ExtendedParserError<'_, ExtendedBigDecimal>> {
+    allowed_suffixes: &'a [(char, u32)],
+) -> Result<ExtendedBigDecimal, ExtendedParserError<'a, ExtendedBigDecimal>> {
     let input_lc = input.to_ascii_lowercase();
 
     // Array of ("String to match", return value when sign positive, when sign negative)
@@ -254,7 +255,14 @@ fn parse_special_value(
             if negative {
                 special = -special;
             }
-            let match_len = str.len();
+            let mut match_len = str.len();
+            if let Some(ch) = input.chars().nth(str.chars().count()) {
+                if allowed_suffixes.iter().any(|(c, _)| ch == *c) {
+                    // multiplying is unnecessary for these special values, but we have to note that
+                    // we processed the character to avoid a partial match error
+                    match_len += 1;
+                }
+            }
             return if input.len() == match_len {
                 Ok(special)
             } else {
@@ -381,24 +389,34 @@ fn construct_extended_big_decimal<'a>(
     Ok(ExtendedBigDecimal::BigDecimal(bd))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParseTarget {
+    Decimal,
+    Integral,
+    Duration,
+}
+
 // TODO: As highlighted by clippy, this function _is_ high cognitive complexity, jumps
 // around between integer and float parsing, and should be split in multiple parts.
 #[allow(clippy::cognitive_complexity)]
-fn parse(
-    input: &str,
-    integral_only: bool,
-) -> Result<ExtendedBigDecimal, ExtendedParserError<'_, ExtendedBigDecimal>> {
+pub(crate) fn parse<'a>(
+    input: &'a str,
+    target: ParseTarget,
+    allowed_suffixes: &'a [(char, u32)],
+) -> Result<ExtendedBigDecimal, ExtendedParserError<'a, ExtendedBigDecimal>> {
     // Parse the " and ' prefixes separately
-    if let Some(rest) = input.strip_prefix(['\'', '"']) {
-        let mut chars = rest.char_indices().fuse();
-        let v = chars
-            .next()
-            .map(|(_, c)| ExtendedBigDecimal::BigDecimal(u32::from(c).into()));
-        return match (v, chars.next()) {
-            (Some(v), None) => Ok(v),
-            (Some(v), Some((i, _))) => Err(ExtendedParserError::PartialMatch(v, &rest[i..])),
-            (None, _) => Err(ExtendedParserError::NotNumeric),
-        };
+    if target != ParseTarget::Duration {
+        if let Some(rest) = input.strip_prefix(['\'', '"']) {
+            let mut chars = rest.char_indices().fuse();
+            let v = chars
+                .next()
+                .map(|(_, c)| ExtendedBigDecimal::BigDecimal(u32::from(c).into()));
+            return match (v, chars.next()) {
+                (Some(v), None) => Ok(v),
+                (Some(v), Some((i, _))) => Err(ExtendedParserError::PartialMatch(v, &rest[i..])),
+                (None, _) => Err(ExtendedParserError::NotNumeric),
+            };
+        }
     }
 
     let trimmed_input = input.trim_ascii_start();
@@ -419,7 +437,7 @@ fn parse(
     let (base, rest) = if let Some(rest) = unsigned.strip_prefix('0') {
         if let Some(rest) = rest.strip_prefix(['x', 'X']) {
             (Base::Hexadecimal, rest)
-        } else if integral_only {
+        } else if target == ParseTarget::Integral {
             // Binary/Octal only allowed for integer parsing.
             if let Some(rest) = rest.strip_prefix(['b', 'B']) {
                 (Base::Binary, rest)
@@ -432,29 +450,26 @@ fn parse(
     } else {
         (Base::Decimal, unsigned)
     };
-    if rest.is_empty() {
-        return Err(ExtendedParserError::NotNumeric);
-    }
 
     // Parse the integral part of the number
     let mut chars = rest.chars().enumerate().fuse().peekable();
-    let mut digits = BigUint::zero();
+    let mut digits: Option<BigUint> = None;
     let mut scale = 0u64;
-    let mut exponent = BigInt::zero();
+    let mut exponent: Option<BigInt> = None;
     while let Some(d) = chars.peek().and_then(|&(_, c)| base.digit(c)) {
         chars.next();
-        digits = digits * base as u8 + d;
+        digits = Some(digits.unwrap_or_default() * base as u8 + d);
     }
 
     // Parse fractional/exponent part of the number for supported bases.
-    if matches!(base, Base::Decimal | Base::Hexadecimal) && !integral_only {
+    if matches!(base, Base::Decimal | Base::Hexadecimal) && target != ParseTarget::Integral {
         // Parse the fractional part of the number if there can be one and the input contains
         // a '.' decimal separator.
         if matches!(chars.peek(), Some(&(_, '.'))) {
             chars.next();
             while let Some(d) = chars.peek().and_then(|&(_, c)| base.digit(c)) {
                 chars.next();
-                (digits, scale) = (digits * base as u8 + d, scale + 1);
+                (digits, scale) = (Some(digits.unwrap_or_default() * base as u8 + d), scale + 1);
             }
         }
 
@@ -469,6 +484,8 @@ fn parse(
             .peek()
             .is_some_and(|&(_, c)| c.to_ascii_lowercase() == exp_char)
         {
+            // Save the iterator position in case we do not parse any exponent.
+            let save_chars = chars.clone();
             chars.next();
             let exp_negative = match chars.peek() {
                 Some((_, '-')) => {
@@ -483,24 +500,53 @@ fn parse(
             };
             while let Some(d) = chars.peek().and_then(|&(_, c)| Base::Decimal.digit(c)) {
                 chars.next();
-                exponent = exponent * 10 + d as i64;
+                exponent = Some(exponent.unwrap_or_default() * 10 + d as i64);
             }
-            if exp_negative {
-                exponent = -exponent;
+            if let Some(exp) = &exponent {
+                if exp_negative {
+                    exponent = Some(-exp);
+                }
+            } else {
+                // No exponent actually parsed, reset iterator to return partial match.
+                chars = save_chars;
             }
         }
     }
 
-    // If nothing has been parsed, check if this is a special value, or declare the parsing unsuccessful
-    if let Some((0, _)) = chars.peek() {
-        return if integral_only {
+    // If no digit has been parsed, check if this is a special value, or declare the parsing unsuccessful
+    if digits.is_none() {
+        // If we trimmed an initial `0x`/`0b`, return a partial match.
+        if rest != unsigned {
+            let ebd = if negative {
+                ExtendedBigDecimal::MinusZero
+            } else {
+                ExtendedBigDecimal::zero()
+            };
+            return Err(ExtendedParserError::PartialMatch(ebd, &unsigned[1..]));
+        }
+
+        return if target == ParseTarget::Integral {
             Err(ExtendedParserError::NotNumeric)
         } else {
-            parse_special_value(unsigned, negative)
+            parse_special_value(unsigned, negative, allowed_suffixes)
         };
     }
 
-    let ebd_result = construct_extended_big_decimal(digits, negative, base, scale, exponent);
+    let mut digits = digits.unwrap();
+
+    if let Some((_, ch)) = chars.peek() {
+        if let Some(times) = allowed_suffixes
+            .iter()
+            .find(|(c, _)| ch == c)
+            .map(|&(_, t)| t)
+        {
+            chars.next();
+            digits *= times;
+        }
+    }
+
+    let ebd_result =
+        construct_extended_big_decimal(digits, negative, base, scale, exponent.unwrap_or_default());
 
     // Return what has been parsed so far. If there are extra characters, mark the
     // parsing as a partial match.
@@ -596,6 +642,15 @@ mod tests {
             i64::extended_parse(&format!("{}", i64::MIN as i128 - 1)),
             Err(ExtendedParserError::Overflow(i64::MIN))
         ));
+
+        assert!(matches!(
+            i64::extended_parse(""),
+            Err(ExtendedParserError::NotNumeric)
+        ));
+        assert!(matches!(
+            i64::extended_parse("."),
+            Err(ExtendedParserError::NotNumeric)
+        ));
     }
 
     #[test]
@@ -630,6 +685,16 @@ mod tests {
             Ok(0.15),
             f64::extended_parse(".150000000000000000000000000231313")
         );
+        assert!(matches!(f64::extended_parse("123.15e"),
+                         Err(ExtendedParserError::PartialMatch(f, "e")) if f == 123.15));
+        assert!(matches!(f64::extended_parse("123.15E"),
+                         Err(ExtendedParserError::PartialMatch(f, "E")) if f == 123.15));
+        assert!(matches!(f64::extended_parse("123.15e-"),
+                         Err(ExtendedParserError::PartialMatch(f, "e-")) if f == 123.15));
+        assert!(matches!(f64::extended_parse("123.15e+"),
+                         Err(ExtendedParserError::PartialMatch(f, "e+")) if f == 123.15));
+        assert!(matches!(f64::extended_parse("123.15e."),
+                         Err(ExtendedParserError::PartialMatch(f, "e.")) if f == 123.15));
         assert!(matches!(f64::extended_parse("1.2.3"),
                          Err(ExtendedParserError::PartialMatch(f, ".3")) if f == 1.2));
         assert!(matches!(f64::extended_parse("123.15p5"),
@@ -782,6 +847,48 @@ mod tests {
             ExtendedBigDecimal::extended_parse(&format!("-0e{}", i64::MIN + 2)),
             Ok(ExtendedBigDecimal::MinusZero)
         );
+
+        /* Invalid numbers */
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse(".")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("e")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse(".e")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("-e")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("+.e")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("e10")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("e-10")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("-e10")
+        );
+        assert_eq!(
+            Err(ExtendedParserError::NotNumeric),
+            ExtendedBigDecimal::extended_parse("+e10")
+        );
     }
 
     #[test]
@@ -801,6 +908,15 @@ mod tests {
         // We cannot really check that 'e' is not a valid exponent indicator for hex floats...
         // but we can check that the number still gets parsed properly: 0x0.8e5 is 0x8e5 / 16**3
         assert_eq!(Ok(0.555908203125), f64::extended_parse("0x0.8e5"));
+
+        assert!(matches!(f64::extended_parse("0x0.1p"),
+                        Err(ExtendedParserError::PartialMatch(f, "p")) if f == 0.0625));
+        assert!(matches!(f64::extended_parse("0x0.1p-"),
+                        Err(ExtendedParserError::PartialMatch(f, "p-")) if f == 0.0625));
+        assert!(matches!(f64::extended_parse("0x.1p+"),
+                        Err(ExtendedParserError::PartialMatch(f, "p+")) if f == 0.0625));
+        assert!(matches!(f64::extended_parse("0x.1p."),
+                        Err(ExtendedParserError::PartialMatch(f, "p.")) if f == 0.0625));
 
         assert_eq!(
             Ok(ExtendedBigDecimal::BigDecimal(
@@ -858,6 +974,42 @@ mod tests {
                 ExtendedBigDecimal::MinusZero
             ))
         ));
+
+        // Not actually hex numbers, but the prefixes look like it.
+        assert!(matches!(f64::extended_parse("0x"),
+            Err(ExtendedParserError::PartialMatch(f, "x")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("0x."),
+            Err(ExtendedParserError::PartialMatch(f, "x.")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("0xp"),
+            Err(ExtendedParserError::PartialMatch(f, "xp")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("0xp-2"),
+            Err(ExtendedParserError::PartialMatch(f, "xp-2")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("0x.p-2"),
+            Err(ExtendedParserError::PartialMatch(f, "x.p-2")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("0X"),
+            Err(ExtendedParserError::PartialMatch(f, "X")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("-0x"),
+            Err(ExtendedParserError::PartialMatch(f, "x")) if f == -0.0));
+        assert!(matches!(f64::extended_parse("+0x"),
+            Err(ExtendedParserError::PartialMatch(f, "x")) if f == 0.0));
+        assert!(matches!(f64::extended_parse("-0x."),
+            Err(ExtendedParserError::PartialMatch(f, "x.")) if f == -0.0));
+        assert!(matches!(
+            u64::extended_parse("0x"),
+            Err(ExtendedParserError::PartialMatch(0, "x"))
+        ));
+        assert!(matches!(
+            u64::extended_parse("-0x"),
+            Err(ExtendedParserError::PartialMatch(0, "x"))
+        ));
+        assert!(matches!(
+            i64::extended_parse("0x"),
+            Err(ExtendedParserError::PartialMatch(0, "x"))
+        ));
+        assert!(matches!(
+            i64::extended_parse("-0x"),
+            Err(ExtendedParserError::PartialMatch(0, "x"))
+        ));
     }
 
     #[test]
@@ -891,6 +1043,27 @@ mod tests {
         assert_eq!(Ok(0b1011), u64::extended_parse("+0b1011"));
         assert_eq!(Ok(-0b1011), i64::extended_parse("-0b1011"));
 
+        assert!(matches!(
+            u64::extended_parse("0b"),
+            Err(ExtendedParserError::PartialMatch(0, "b"))
+        ));
+        assert!(matches!(
+            u64::extended_parse("0b."),
+            Err(ExtendedParserError::PartialMatch(0, "b."))
+        ));
+        assert!(matches!(
+            u64::extended_parse("-0b"),
+            Err(ExtendedParserError::PartialMatch(0, "b"))
+        ));
+        assert!(matches!(
+            i64::extended_parse("0b"),
+            Err(ExtendedParserError::PartialMatch(0, "b"))
+        ));
+        assert!(matches!(
+            i64::extended_parse("-0b"),
+            Err(ExtendedParserError::PartialMatch(0, "b"))
+        ));
+
         // Binary not allowed for floats
         assert!(matches!(
             f64::extended_parse("0b100"),
@@ -904,6 +1077,15 @@ mod tests {
         assert!(match ExtendedBigDecimal::extended_parse("0b100.1") {
             Err(ExtendedParserError::PartialMatch(ebd, "b100.1")) =>
                 ebd == ExtendedBigDecimal::zero(),
+            _ => false,
+        });
+
+        assert!(match ExtendedBigDecimal::extended_parse("0b") {
+            Err(ExtendedParserError::PartialMatch(ebd, "b")) => ebd == ExtendedBigDecimal::zero(),
+            _ => false,
+        });
+        assert!(match ExtendedBigDecimal::extended_parse("0b.") {
+            Err(ExtendedParserError::PartialMatch(ebd, "b.")) => ebd == ExtendedBigDecimal::zero(),
             _ => false,
         });
     }
