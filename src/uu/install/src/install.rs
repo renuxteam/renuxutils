@@ -25,6 +25,8 @@ use uucore::fs::dir_strip_dot_for_creation;
 use uucore::mode::get_umask;
 use uucore::perms::{Verbosity, VerbosityLevel, wrap_chown};
 use uucore::process::{getegid, geteuid};
+#[cfg(feature = "selinux")]
+use uucore::selinux::{contexts_differ, set_selinux_security_context};
 use uucore::{format_usage, help_about, help_usage, show, show_error, show_if_err};
 
 #[cfg(unix)]
@@ -50,13 +52,13 @@ pub struct Behavior {
     strip_program: String,
     create_leading: bool,
     target_dir: Option<String>,
+    no_target_dir: bool,
+    preserve_context: bool,
+    context: Option<String>,
 }
 
 #[derive(Error, Debug)]
 enum InstallError {
-    #[error("Unimplemented feature: {0}")]
-    Unimplemented(String),
-
     #[error("{} with -d requires at least one argument.", uucore::util_name())]
     DirNeedsArg,
 
@@ -98,14 +100,24 @@ enum InstallError {
 
     #[error("failed to access {}: Not a directory", .0.quote())]
     NotADirectory(PathBuf),
+
+    #[error("cannot overwrite directory {} with non-directory {}", .0.quote(), .1.quote())]
+    OverrideDirectoryFailed(PathBuf, PathBuf),
+
+    #[error("'{0}' and '{1}' are the same file")]
+    SameFile(PathBuf, PathBuf),
+
+    #[error("extra operand {}\n{}", .0.quote(), .1.quote())]
+    ExtraOperand(String, String),
+
+    #[cfg(feature = "selinux")]
+    #[error("{}", .0)]
+    SelinuxContextFailed(String),
 }
 
 impl UError for InstallError {
     fn code(&self) -> i32 {
-        match self {
-            Self::Unimplemented(_) => 2,
-            _ => 1,
-        }
+        1
     }
 
     fn usage(&self) -> bool {
@@ -162,8 +174,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .map(|v| v.map(ToString::to_string).collect())
         .unwrap_or_default();
 
-    check_unimplemented(&matches)?;
-
     let behavior = behavior(&matches)?;
 
     match behavior.main_function {
@@ -207,7 +217,6 @@ pub fn uu_app() -> Command {
                 .action(ArgAction::SetTrue),
         )
         .arg(
-            // TODO implement flag
             Arg::new(OPT_CREATE_LEADING)
                 .short('D')
                 .help(
@@ -264,7 +273,6 @@ pub fn uu_app() -> Command {
         )
         .arg(backup_control::arguments::suffix())
         .arg(
-            // TODO implement flag
             Arg::new(OPT_TARGET_DIRECTORY)
                 .short('t')
                 .long(OPT_TARGET_DIRECTORY)
@@ -273,11 +281,10 @@ pub fn uu_app() -> Command {
                 .value_hint(clap::ValueHint::DirPath),
         )
         .arg(
-            // TODO implement flag
             Arg::new(OPT_NO_TARGET_DIRECTORY)
                 .short('T')
                 .long(OPT_NO_TARGET_DIRECTORY)
-                .help("(unimplemented) treat DEST as a normal file")
+                .help("treat DEST as a normal file")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -288,21 +295,20 @@ pub fn uu_app() -> Command {
                 .action(ArgAction::SetTrue),
         )
         .arg(
-            // TODO implement flag
             Arg::new(OPT_PRESERVE_CONTEXT)
                 .short('P')
                 .long(OPT_PRESERVE_CONTEXT)
-                .help("(unimplemented) preserve security context")
+                .help("preserve security context")
                 .action(ArgAction::SetTrue),
         )
         .arg(
-            // TODO implement flag
             Arg::new(OPT_CONTEXT)
                 .short('Z')
                 .long(OPT_CONTEXT)
-                .help("(unimplemented) set security context of files and directories")
+                .help("set security context of files and directories")
                 .value_name("CONTEXT")
-                .action(ArgAction::SetTrue),
+                .value_parser(clap::value_parser!(String))
+                .num_args(0..=1),
         )
         .arg(
             Arg::new(ARG_FILES)
@@ -310,27 +316,6 @@ pub fn uu_app() -> Command {
                 .num_args(1..)
                 .value_hint(clap::ValueHint::AnyPath),
         )
-}
-
-/// Check for unimplemented command line arguments.
-///
-/// Either return the degenerate Ok value, or an Err with string.
-///
-/// # Errors
-///
-/// Error datum is a string of the unimplemented argument.
-///
-///
-fn check_unimplemented(matches: &ArgMatches) -> UResult<()> {
-    if matches.get_flag(OPT_NO_TARGET_DIRECTORY) {
-        Err(InstallError::Unimplemented(String::from("--no-target-directory, -T")).into())
-    } else if matches.get_flag(OPT_PRESERVE_CONTEXT) {
-        Err(InstallError::Unimplemented(String::from("--preserve-context, -P")).into())
-    } else if matches.get_flag(OPT_CONTEXT) {
-        Err(InstallError::Unimplemented(String::from("--context, -Z")).into())
-    } else {
-        Ok(())
-    }
 }
 
 /// Determine behavior, given command line arguments.
@@ -362,6 +347,11 @@ fn behavior(matches: &ArgMatches) -> UResult<Behavior> {
 
     let backup_mode = backup_control::determine_backup_mode(matches)?;
     let target_dir = matches.get_one::<String>(OPT_TARGET_DIRECTORY).cloned();
+    let no_target_dir = matches.get_flag(OPT_NO_TARGET_DIRECTORY);
+    if target_dir.is_some() && no_target_dir {
+        show_error!("Options --target-directory and --no-target-directory are mutually exclusive");
+        return Err(1.into());
+    }
 
     let preserve_timestamps = matches.get_flag(OPT_PRESERVE_TIMESTAMPS);
     let compare = matches.get_flag(OPT_COMPARE);
@@ -405,6 +395,8 @@ fn behavior(matches: &ArgMatches) -> UResult<Behavior> {
         }
     };
 
+    let context = matches.get_one::<String>(OPT_CONTEXT).cloned();
+
     Ok(Behavior {
         main_function,
         specified_mode,
@@ -424,6 +416,9 @@ fn behavior(matches: &ArgMatches) -> UResult<Behavior> {
         ),
         create_leading: matches.get_flag(OPT_CREATE_LEADING),
         target_dir,
+        no_target_dir,
+        preserve_context: matches.get_flag(OPT_PRESERVE_CONTEXT),
+        context,
     })
 }
 
@@ -474,6 +469,10 @@ fn directory(paths: &[String], b: &Behavior) -> UResult<()> {
             }
 
             show_if_err!(chown_optional_user_group(path, b));
+
+            // Set SELinux context for directory if needed
+            #[cfg(feature = "selinux")]
+            show_if_err!(set_selinux_context(path, b));
         }
         // If the exit code was set, or show! has been called at least once
         // (which sets the exit code as well), function execution will end after
@@ -515,6 +514,9 @@ fn standard(mut paths: Vec<String>, b: &Behavior) -> UResult<()> {
     // first check that paths contains at least one element
     if paths.is_empty() {
         return Err(UUsageError::new(1, "missing file operand"));
+    }
+    if b.no_target_dir && paths.len() > 2 {
+        return Err(InstallError::ExtraOperand(paths[2].clone(), format_usage(USAGE)).into());
     }
 
     // get the target from either "-t foo" param or from the last given paths argument
@@ -585,13 +587,23 @@ fn standard(mut paths: Vec<String>, b: &Behavior) -> UResult<()> {
         }
     }
 
-    if sources.len() > 1 || is_potential_directory_path(&target) {
+    if sources.len() > 1 {
         copy_files_into_dir(sources, &target, b)
     } else {
         let source = sources.first().unwrap();
 
         if source.is_dir() {
             return Err(InstallError::OmittingDirectory(source.clone()).into());
+        }
+
+        if b.no_target_dir && target.exists() {
+            return Err(
+                InstallError::OverrideDirectoryFailed(target.clone(), source.clone()).into(),
+            );
+        }
+
+        if is_potential_directory_path(&target) {
+            return copy_files_into_dir(sources, &target, b);
         }
 
         if target.is_file() || is_new_file_path(&target) {
@@ -706,12 +718,9 @@ fn perform_backup(to: &Path, b: &Behavior) -> UResult<Option<PathBuf>> {
         }
         let backup_path = backup_control::get_backup_path(b.backup_mode, to, &b.suffix);
         if let Some(ref backup_path) = backup_path {
-            // TODO!!
-            if let Err(err) = fs::rename(to, backup_path) {
-                return Err(
-                    InstallError::BackupFailed(to.to_path_buf(), backup_path.clone(), err).into(),
-                );
-            }
+            fs::rename(to, backup_path).map_err(|err| {
+                InstallError::BackupFailed(to.to_path_buf(), backup_path.clone(), err)
+            })?;
         }
         Ok(backup_path)
     } else {
@@ -748,6 +757,19 @@ fn copy_normal_file(from: &Path, to: &Path) -> UResult<()> {
 /// Returns an empty Result or an error in case of failure.
 ///
 fn copy_file(from: &Path, to: &Path) -> UResult<()> {
+    if let Ok(to_abs) = to.canonicalize() {
+        if from.canonicalize()? == to_abs {
+            return Err(InstallError::SameFile(from.to_path_buf(), to.to_path_buf()).into());
+        }
+    }
+
+    if to.is_dir() && !from.is_dir() {
+        return Err(InstallError::OverrideDirectoryFailed(
+            to.to_path_buf().clone(),
+            from.to_path_buf().clone(),
+        )
+        .into());
+    }
     // fs::copy fails if destination is a invalid symlink.
     // so lets just remove all existing files at destination before copy.
     if let Err(e) = fs::remove_file(to) {
@@ -907,6 +929,14 @@ fn copy(from: &Path, to: &Path, b: &Behavior) -> UResult<()> {
         preserve_timestamps(from, to)?;
     }
 
+    #[cfg(feature = "selinux")]
+    if b.preserve_context {
+        uucore::selinux::preserve_security_context(from, to)
+            .map_err(|e| InstallError::SelinuxContextFailed(e.to_string()))?;
+    } else if b.context.is_some() {
+        set_selinux_context(to, b)?;
+    }
+
     if b.verbose {
         print!("{} -> {}", from.quote(), to.quote());
         match backup_path {
@@ -978,6 +1008,11 @@ fn need_copy(from: &Path, to: &Path, b: &Behavior) -> UResult<bool> {
         return Ok(true);
     }
 
+    #[cfg(feature = "selinux")]
+    if b.preserve_context && contexts_differ(from, to) {
+        return Ok(true);
+    }
+
     // TODO: if -P (#1809) and from/to contexts mismatch, return true.
 
     // Check if the owner ID is specified and differs from the destination file's owner.
@@ -1007,4 +1042,14 @@ fn need_copy(from: &Path, to: &Path, b: &Behavior) -> UResult<bool> {
     }
 
     Ok(false)
+}
+
+#[cfg(feature = "selinux")]
+fn set_selinux_context(path: &Path, behavior: &Behavior) -> UResult<()> {
+    if !behavior.preserve_context && behavior.context.is_some() {
+        // Use the provided context set by -Z/--context
+        set_selinux_security_context(path, behavior.context.as_ref())
+            .map_err(|e| InstallError::SelinuxContextFailed(e.to_string()))?;
+    }
+    Ok(())
 }

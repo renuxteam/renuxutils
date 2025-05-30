@@ -3,8 +3,8 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 // spell-checker:ignore αbcdef ; (people) kkos
-// spell-checker:ignore aabcccd aabcd aabd abbbd abbcabc abbcac abbcbbbd abbcbd
-// spell-checker:ignore abbccd abcac acabc andand bigcmp bignum emptysub
+// spell-checker:ignore aabcccd aabcd aabd abbb abbbd abbcabc abbcac abbcbbbd abbcbd
+// spell-checker:ignore abbccd abcabc abcac acabc andand bigcmp bignum emptysub
 // spell-checker:ignore orempty oror
 
 use uutests::new_ucmd;
@@ -273,28 +273,225 @@ fn test_length_mb() {
 }
 
 #[test]
-fn test_regex() {
-    // FixME: [2022-12-19; rivy] test disabled as it currently fails due to 'oniguruma' bug (see GH:kkos/oniguruma/issues/279)
-    // new_ucmd!()
-    //     .args(&["a^b", ":", "a^b"])
-    //     .succeeds()
-    //     .stdout_only("3\n");
+fn test_regex_empty() {
+    new_ucmd!().args(&["", ":", ""]).fails().stdout_only("0\n");
+    new_ucmd!()
+        .args(&["abc", ":", ""])
+        .fails()
+        .stdout_only("0\n");
+}
+
+#[test]
+fn test_regex_trailing_backslash() {
+    new_ucmd!()
+        .args(&["\\", ":", "\\\\"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["\\", ":", "\\"])
+        .fails()
+        .stderr_only("expr: Trailing backslash\n");
+    new_ucmd!()
+        .args(&["abc\\", ":", "abc\\\\"])
+        .succeeds()
+        .stdout_only("4\n");
+    new_ucmd!()
+        .args(&["abc\\", ":", "abc\\"])
+        .fails()
+        .stderr_only("expr: Trailing backslash\n");
+}
+
+#[test]
+fn test_regex_caret() {
+    new_ucmd!()
+        .args(&["a^b", ":", "a^b"])
+        .succeeds()
+        .stdout_only("3\n");
     new_ucmd!()
         .args(&["a^b", ":", "a\\^b"])
         .succeeds()
         .stdout_only("3\n");
     new_ucmd!()
+        .args(&["abc", ":", "^abc"])
+        .succeeds()
+        .stdout_only("3\n");
+    new_ucmd!()
+        .args(&["^abc", ":", "^^abc"])
+        .succeeds()
+        .stdout_only("4\n");
+    new_ucmd!()
+        .args(&["b", ":", "a\\|^b"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["ab", ":", "\\(^a\\)b"])
+        .succeeds()
+        .stdout_only("a\n");
+    new_ucmd!()
+        .args(&["^abc", ":", "^abc"])
+        .fails()
+        .stdout_only("0\n");
+    new_ucmd!()
+        .args(&["^^^^^^^^^", ":", "^^^"])
+        .succeeds()
+        .stdout_only("2\n");
+    new_ucmd!()
+        .args(&["ab[^c]", ":", "ab[^c]"])
+        .succeeds()
+        .stdout_only("3\n"); // Matches "ab["
+    new_ucmd!()
+        .args(&["ab[^c]", ":", "ab\\[^c]"])
+        .succeeds()
+        .stdout_only("6\n");
+    new_ucmd!()
+        .args(&["[^a]", ":", "\\[^a]"])
+        .succeeds()
+        .stdout_only("4\n");
+    new_ucmd!()
+        .args(&["\\a", ":", "\\\\[^^]"])
+        .succeeds()
+        .stdout_only("2\n");
+    // Patterns are anchored to the beginning of the pattern "^bc"
+    new_ucmd!()
+        .args(&["abc", ":", "bc"])
+        .fails()
+        .stdout_only("0\n");
+    new_ucmd!()
+        .args(&["^a", ":", "^^[^^]"])
+        .succeeds()
+        .stdout_only("2\n");
+    new_ucmd!()
+        .args(&["abc", ":", "ab[^c]"])
+        .fails()
+        .stdout_only("0\n");
+}
+
+#[test]
+fn test_regex_dollar() {
+    new_ucmd!()
         .args(&["a$b", ":", "a\\$b"])
         .succeeds()
         .stdout_only("3\n");
+    new_ucmd!()
+        .args(&["a", ":", "a$\\|b"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["ab", ":", "a\\(b$\\)"])
+        .succeeds()
+        .stdout_only("b\n");
+    new_ucmd!()
+        .args(&["a$c", ":", "a$\\c"])
+        .succeeds()
+        .stdout_only("3\n");
+    new_ucmd!()
+        .args(&["$a", ":", "$a"])
+        .succeeds()
+        .stdout_only("2\n");
+    new_ucmd!()
+        .args(&["a", ":", "a$\\|b"])
+        .succeeds()
+        .stdout_only("1\n");
     new_ucmd!()
         .args(&["-5", ":", "-\\{0,1\\}[0-9]*$"])
         .succeeds()
         .stdout_only("2\n");
     new_ucmd!()
-        .args(&["abc", ":", "bc"])
+        .args(&["$", ":", "$"])
         .fails()
         .stdout_only("0\n");
+    new_ucmd!()
+        .args(&["a$", ":", "a$\\|b"])
+        .fails()
+        .stdout_only("0\n");
+}
+
+#[test]
+fn test_regex_range_quantifier() {
+    new_ucmd!()
+        .args(&["a", ":", "a\\{1\\}"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["aaaaaaaaaa", ":", "a\\{1,\\}"])
+        .succeeds()
+        .stdout_only("10\n");
+    new_ucmd!()
+        .args(&["aaa", ":", "a\\{,3\\}"])
+        .succeeds()
+        .stdout_only("3\n");
+    new_ucmd!()
+        .args(&["aa", ":", "a\\{1,3\\}"])
+        .succeeds()
+        .stdout_only("2\n");
+    new_ucmd!()
+        .args(&["aaaa", ":", "a\\{,\\}"])
+        .succeeds()
+        .stdout_only("4\n");
+    new_ucmd!()
+        .args(&["a", ":", "ab\\{,3\\}"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["abbb", ":", "ab\\{,3\\}"])
+        .succeeds()
+        .stdout_only("4\n");
+    new_ucmd!()
+        .args(&["abcabc", ":", "\\(abc\\)\\{,\\}"])
+        .succeeds()
+        .stdout_only("abc\n");
+    new_ucmd!()
+        .args(&["a", ":", "a\\{,6\\}"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["{abc}", ":", "\\{abc\\}"])
+        .succeeds()
+        .stdout_only("5\n");
+    new_ucmd!()
+        .args(&["a{bc}", ":", "a\\(\\{bc\\}\\)"])
+        .succeeds()
+        .stdout_only("{bc}\n");
+    new_ucmd!()
+        .args(&["{b}", ":", "a\\|\\{b\\}"])
+        .succeeds()
+        .stdout_only("3\n");
+    new_ucmd!()
+        .args(&["{", ":", "a\\|\\{"])
+        .succeeds()
+        .stdout_only("1\n");
+    new_ucmd!()
+        .args(&["{}}}", ":", "\\{\\}\\}\\}"])
+        .succeeds()
+        .stdout_only("4\n");
+    new_ucmd!()
+        .args(&["a{}}}", ":", "a\\{\\}\\}\\}"])
+        .fails()
+        .stderr_only("expr: Invalid content of \\{\\}\n");
+    new_ucmd!()
+        .args(&["ab", ":", "ab\\{\\}"])
+        .fails()
+        .stderr_only("expr: Invalid content of \\{\\}\n");
+    new_ucmd!()
+        .args(&["_", ":", "a\\{12345678901234567890\\}"])
+        .fails()
+        .stderr_only("expr: Regular expression too big\n");
+    new_ucmd!()
+        .args(&["_", ":", "a\\{12345678901234567890,\\}"])
+        .fails()
+        .stderr_only("expr: Regular expression too big\n");
+    new_ucmd!()
+        .args(&["_", ":", "a\\{,12345678901234567890\\}"])
+        .fails()
+        .stderr_only("expr: Regular expression too big\n");
+    new_ucmd!()
+        .args(&["_", ":", "a\\{1,12345678901234567890\\}"])
+        .fails()
+        .stderr_only("expr: Regular expression too big\n");
+    new_ucmd!()
+        .args(&["_", ":", "a\\{1,1234567890abcdef\\}"])
+        .fails()
+        .stderr_only("expr: Invalid content of \\{\\}\n");
 }
 
 #[test]
@@ -618,7 +815,6 @@ mod gnu_expr {
             .stdout_only("1\n");
     }
 
-    #[ignore]
     #[test]
     fn test_anchor() {
         new_ucmd!()
@@ -711,7 +907,6 @@ mod gnu_expr {
             .stdout_only("\n");
     }
 
-    #[ignore = "rust-onig bug, see https://github.com/rust-onig/rust-onig/issues/188"]
     #[test]
     fn test_bre10() {
         new_ucmd!()
@@ -720,7 +915,6 @@ mod gnu_expr {
             .stdout_only("3\n");
     }
 
-    #[ignore]
     #[test]
     fn test_bre11() {
         new_ucmd!()
@@ -769,7 +963,6 @@ mod gnu_expr {
             .stdout_only("\n");
     }
 
-    #[ignore]
     #[test]
     fn test_bre17() {
         new_ucmd!()
@@ -778,7 +971,6 @@ mod gnu_expr {
             .stdout_only("{1}a\n");
     }
 
-    #[ignore]
     #[test]
     fn test_bre18() {
         new_ucmd!()
@@ -787,7 +979,6 @@ mod gnu_expr {
             .stdout_only("1\n");
     }
 
-    #[ignore]
     #[test]
     fn test_bre19() {
         new_ucmd!()
@@ -999,7 +1190,6 @@ mod gnu_expr {
             .stderr_contains("Invalid content of \\{\\}");
     }
 
-    #[ignore]
     #[test]
     fn test_bre45() {
         new_ucmd!()
@@ -1008,7 +1198,6 @@ mod gnu_expr {
             .stdout_only("1\n");
     }
 
-    #[ignore]
     #[test]
     fn test_bre46() {
         new_ucmd!()
@@ -1041,7 +1230,7 @@ mod gnu_expr {
             .args(&["_", ":", "a\\{32768\\}"])
             .fails_with_code(2)
             .no_stdout()
-            .stderr_contains("Invalid content of \\{\\}");
+            .stderr_contains("Regular expression too big\n");
     }
 
     #[test]

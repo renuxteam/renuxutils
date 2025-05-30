@@ -12,16 +12,16 @@ use uutests::new_ucmd;
 use uutests::util::TestScenario;
 use uutests::util_name;
 
-#[cfg(not(any(target_os = "macos", target_os = "openbsd")))]
+#[cfg(not(any(target_os = "macos", target_os = "openbsd", target_env = "musl")))]
 use bincode::{config, serde::encode_to_vec};
 use regex::Regex;
-#[cfg(not(any(target_os = "macos", target_os = "openbsd")))]
+#[cfg(not(any(target_os = "macos", target_os = "openbsd", target_env = "musl")))]
 use serde::Serialize;
-#[cfg(not(any(target_os = "macos", target_os = "openbsd")))]
+#[cfg(not(any(target_os = "macos", target_os = "openbsd", target_env = "musl")))]
 use serde_big_array::BigArray;
-#[cfg(not(any(target_os = "macos", target_os = "openbsd")))]
+#[cfg(not(any(target_os = "macos", target_os = "openbsd", target_env = "musl")))]
 use std::fs::File;
-#[cfg(not(any(target_os = "macos", target_os = "openbsd")))]
+#[cfg(not(any(target_os = "macos", target_os = "openbsd", target_env = "musl")))]
 use std::{io::Write, path::PathBuf};
 
 #[test]
@@ -251,7 +251,7 @@ fn test_uptime_with_extra_argument() {
         .arg("a")
         .arg("b")
         .fails()
-        .stderr_contains("extra operand 'b'");
+        .stderr_contains("unexpected value 'b'");
 }
 /// Checks whether uptime displays the correct stderr msg when its called with a directory
 #[test]

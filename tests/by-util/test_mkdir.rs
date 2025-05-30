@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore bindgen getfattr testtest
+// spell-checker:ignore bindgen testtest
 
 #![allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 
@@ -411,7 +411,7 @@ fn test_selinux_invalid() {
         .arg(at.plus_as_string(dest))
         .fails()
         .no_stdout()
-        .stderr_contains("failed to set SELinux security context:");
+        .stderr_contains("failed to set default file creation context to 'testtest':");
     // invalid context, so, no directory
     assert!(!at.dir_exists(dest));
 }

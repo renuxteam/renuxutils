@@ -24,8 +24,10 @@ pub use uucore_procs::*;
 // * cross-platform modules
 pub use crate::mods::display;
 pub use crate::mods::error;
+#[cfg(feature = "fs")]
 pub use crate::mods::io;
 pub use crate::mods::line_ending;
+pub use crate::mods::locale;
 pub use crate::mods::os;
 pub use crate::mods::panic;
 pub use crate::mods::posix;
@@ -45,6 +47,8 @@ pub use crate::features::custom_tz_fmt;
 pub use crate::features::encoding;
 #[cfg(feature = "extendedbigdecimal")]
 pub use crate::features::extendedbigdecimal;
+#[cfg(feature = "fast-inc")]
+pub use crate::features::fast_inc;
 #[cfg(feature = "format")]
 pub use crate::features::format;
 #[cfg(feature = "fs")]

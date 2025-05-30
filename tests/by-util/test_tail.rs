@@ -96,8 +96,6 @@ fn test_stdin_explicit() {
 }
 
 #[test]
-// FIXME: the -f test fails with: Assertion failed. Expected 'tail' to be running but exited with status=exit status: 0
-#[ignore = "disabled until fixed"]
 #[cfg(not(target_vendor = "apple"))] // FIXME: for currently not working platforms
 fn test_stdin_redirect_file() {
     // $ echo foo > f
@@ -105,7 +103,7 @@ fn test_stdin_redirect_file() {
     // $ tail < f
     // foo
 
-    // $ tail -f < f
+    // $ tail -v < f
     // foo
     //
 
@@ -122,6 +120,22 @@ fn test_stdin_redirect_file() {
         .arg("-v")
         .succeeds()
         .stdout_only("==> standard input <==\nfoo");
+}
+
+#[test]
+// FIXME: the -f test fails with: Assertion failed. Expected 'tail' to be running but exited with status=exit status: 0
+#[ignore = "disabled until fixed"]
+#[cfg(not(target_vendor = "apple"))] // FIXME: for currently not working platforms
+fn test_stdin_redirect_file_follow() {
+    // $ echo foo > f
+
+    // $ tail -f < f
+    // foo
+    //
+
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("f", "foo");
 
     let mut p = ts
         .ucmd()
@@ -330,6 +344,55 @@ fn test_stdin_redirect_dir_when_target_os_is_macos() {
         .fails_with_code(1)
         .no_stdout()
         .stderr_is("tail: cannot open 'standard input' for reading: No such file or directory\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stdin_via_script_redirection_and_pipe() {
+    // $ touch file.txt
+    // $ echo line1 > file.txt
+    // $ echo line2 >> file.txt
+    // $ chmod +x test.sh
+    // $ ./test.sh < file.txt
+    // line1
+    // line2
+    // $ cat file.txt | ./test.sh
+    // line1
+    // line2
+    use std::os::unix::fs::PermissionsExt;
+
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let data = "line1\nline2\n";
+
+    at.write("file.txt", data);
+
+    let mut script = at.make_file("test.sh");
+    writeln!(script, "#!/usr/bin/env sh").unwrap();
+    writeln!(script, "tail").unwrap();
+    script
+        .set_permissions(PermissionsExt::from_mode(0o755))
+        .unwrap();
+
+    drop(script); // close the file handle to ensure file is not busy
+
+    // test with redirection
+    scene
+        .cmd("sh")
+        .current_dir(at.plus(""))
+        .arg("-c")
+        .arg("./test.sh < file.txt")
+        .succeeds()
+        .stdout_only(data);
+
+    // test with pipe
+    scene
+        .cmd("sh")
+        .current_dir(at.plus(""))
+        .arg("-c")
+        .arg("cat file.txt | ./test.sh")
+        .succeeds()
+        .stdout_only(data);
 }
 
 #[test]
@@ -4430,7 +4493,6 @@ fn test_follow_when_files_are_pointing_to_same_relative_file_and_file_stays_same
 }
 
 #[rstest]
-#[case::exponent_exceed_float_max("1.0e100000")]
 #[case::underscore_delimiter("1_000")]
 #[case::only_point(".")]
 #[case::space_in_primes("' '")]

@@ -1,15 +1,14 @@
-use chrono::{DateTime, Duration, Utc};
 // This file is part of the uutils coreutils package.
 //
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
+
+use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc}; // spell-checker:disable-line
 use regex::Regex;
 #[cfg(all(unix, not(target_os = "macos")))]
 use uucore::process::geteuid;
-use uutests::at_and_ucmd;
-use uutests::new_ucmd;
 use uutests::util::TestScenario;
-use uutests::util_name;
+use uutests::{at_and_ucmd, new_ucmd, util_name};
 
 #[test]
 fn test_invalid_arg() {
@@ -165,6 +164,14 @@ fn test_date_format_y() {
 
     re = Regex::new(r"^\d{2}\n$").unwrap();
     scene.ucmd().arg("+%y").succeeds().stdout_matches(&re);
+}
+
+#[test]
+fn test_date_format_q() {
+    let scene = TestScenario::new(util_name!());
+
+    let re = Regex::new(r"^[1-4]\n$").unwrap();
+    scene.ucmd().arg("+%q").succeeds().stdout_matches(&re);
 }
 
 #[test]
@@ -379,10 +386,12 @@ fn test_invalid_format_string() {
 }
 
 #[test]
-fn test_unsupported_format() {
-    let result = new_ucmd!().arg("+%#z").fails();
-    result.no_stdout();
-    assert!(result.stderr_str().starts_with("date: invalid format %#z"));
+fn test_capitalized_numeric_time_zone() {
+    // %z     +hhmm numeric time zone (e.g., -0400)
+    // # is supposed to capitalize, which makes little sense here, but chrono crashes
+    // on such format so it's good to test.
+    let re = Regex::new(r"^[+-]\d{4,4}\n$").unwrap();
+    new_ucmd!().arg("+%#z").succeeds().stdout_matches(&re);
 }
 
 #[test]
@@ -397,10 +406,13 @@ fn test_date_string_human() {
         "30 minutes ago",
         "10 seconds",
         "last day",
+        "last monday",
         "last week",
         "last month",
         "last year",
+        "this monday",
         "next day",
+        "next monday",
         "next week",
         "next month",
         "next year",
@@ -441,10 +453,50 @@ fn test_negative_offset() {
 }
 
 #[test]
+fn test_relative_weekdays() {
+    // Truncate time component to midnight
+    let today = Utc::now().with_time(NaiveTime::MIN).unwrap();
+    // Loop through each day of the week, starting with today
+    for offset in 0..7 {
+        for direction in ["last", "this", "next"] {
+            let weekday = (today + Duration::days(offset))
+                .weekday()
+                .to_string()
+                .to_lowercase();
+            new_ucmd!()
+                .arg("-d")
+                .arg(format!("{} {}", direction, weekday))
+                .arg("--rfc-3339=seconds")
+                .arg("--utc")
+                .succeeds()
+                .stdout_str_check(|out| {
+                    let result = DateTime::parse_from_rfc3339(out.trim()).unwrap().to_utc();
+                    let expected = match (direction, offset) {
+                        ("last", _) => today - Duration::days(7 - offset),
+                        ("this", 0) => today,
+                        ("next", 0) => today + Duration::days(7),
+                        _ => today + Duration::days(offset),
+                    };
+                    result == expected
+                });
+        }
+    }
+}
+
+#[test]
 fn test_invalid_date_string() {
     new_ucmd!()
         .arg("-d")
         .arg("foo")
+        .fails()
+        .no_stdout()
+        .stderr_contains("invalid date");
+
+    new_ucmd!()
+        .arg("-d")
+        // cSpell:disable
+        .arg("this fooday")
+        // cSpell:enable
         .fails()
         .no_stdout()
         .stderr_contains("invalid date");

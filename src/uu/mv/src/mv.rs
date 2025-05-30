@@ -10,6 +10,7 @@ mod error;
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, ArgMatches, Command, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
@@ -17,12 +18,17 @@ use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::unix;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 #[cfg(windows)]
 use std::os::windows;
 use std::path::{Path, PathBuf, absolute};
+
 use uucore::backup_control::{self, source_is_target_backup};
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult, USimpleError, UUsageError, set_exit_code};
+#[cfg(unix)]
+use uucore::fs::make_fifo;
 use uucore::fs::{
     MissingHandling, ResolveMode, are_hardlinks_or_one_way_symlink_to_same_file,
     are_hardlinks_to_same_file, canonicalize, path_ends_with_terminator,
@@ -665,6 +671,16 @@ fn rename(
     Ok(())
 }
 
+#[cfg(unix)]
+fn is_fifo(filetype: fs::FileType) -> bool {
+    filetype.is_fifo()
+}
+
+#[cfg(not(unix))]
+fn is_fifo(_filetype: fs::FileType) -> bool {
+    false
+}
+
 /// A wrapper around `fs::rename`, so that if it fails, we try falling back on
 /// copying and removing.
 fn rename_with_fallback(
@@ -682,8 +698,8 @@ fn rename_with_fallback(
         // 1. Files are on different devices (EXDEV error)
         // 2. On Windows, if the target file exists and source file is opened by another process
         //    (MoveFileExW fails with "Access Denied" even if the source file has FILE_SHARE_DELETE permission)
-        let should_fallback = matches!(err.raw_os_error(), Some(EXDEV))
-            || (from.is_file() && can_delete_file(from).unwrap_or(false));
+        let should_fallback =
+            matches!(err.raw_os_error(), Some(EXDEV)) || (from.is_file() && can_delete_file(from));
         if !should_fallback {
             return Err(err);
         }
@@ -694,10 +710,26 @@ fn rename_with_fallback(
             rename_symlink_fallback(from, to)
         } else if file_type.is_dir() {
             rename_dir_fallback(from, to, multi_progress)
+        } else if is_fifo(file_type) {
+            rename_fifo_fallback(from, to)
         } else {
             rename_file_fallback(from, to)
         }
     })
+}
+
+/// Replace the destination with a new pipe with the same name as the source.
+#[cfg(unix)]
+fn rename_fifo_fallback(from: &Path, to: &Path) -> io::Result<()> {
+    if to.try_exists()? {
+        fs::remove_file(to)?;
+    }
+    make_fifo(to).and_then(|_| fs::remove_file(from))
+}
+
+#[cfg(not(unix))]
+fn rename_fifo_fallback(_from: &Path, _to: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Move the given symlink to the given destination. On Windows, dangling
@@ -794,7 +826,7 @@ fn rename_dir_fallback(
                 io::ErrorKind::PermissionDenied,
                 "Permission denied",
             )),
-            _ => Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
+            _ => Err(io::Error::other(format!("{err:?}"))),
         },
         _ => Ok(()),
     }
@@ -832,7 +864,7 @@ fn is_empty_dir(path: &Path) -> bool {
 
 /// Checks if a file can be deleted by attempting to open it with delete permissions.
 #[cfg(windows)]
-fn can_delete_file(path: &Path) -> Result<bool, io::Error> {
+fn can_delete_file(path: &Path) -> bool {
     use std::{
         os::windows::ffi::OsStrExt as _,
         ptr::{null, null_mut},
@@ -865,19 +897,19 @@ fn can_delete_file(path: &Path) -> Result<bool, io::Error> {
     };
 
     if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+        return false;
     }
 
     unsafe { CloseHandle(handle) };
 
-    Ok(true)
+    true
 }
 
 #[cfg(not(windows))]
-fn can_delete_file(_: &Path) -> Result<bool, io::Error> {
+fn can_delete_file(_: &Path) -> bool {
     // On non-Windows platforms, always return false to indicate that we don't need
     // to try the copy+delete fallback. This is because on Unix-like systems,
     // rename() failing with errors other than EXDEV means the operation cannot
     // succeed even with a copy+delete approach (e.g. permission errors).
-    Ok(false)
+    false
 }

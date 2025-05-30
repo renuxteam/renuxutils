@@ -17,9 +17,7 @@ use std::{
 };
 use uutests::util::{AtPath, TestScenario};
 
-use uutests::at_and_ucmd;
-use uutests::new_ucmd;
-use uutests::util_name;
+use uutests::{at_and_ucmd, new_ucmd, util_name};
 
 fn random_chars(n: usize) -> String {
     rng()
@@ -114,9 +112,14 @@ impl RandomFile {
 
     /// Add n lines each of size `RandomFile::LINESIZE`
     fn add_lines(&mut self, lines: usize) {
+        self.add_lines_with_line_size(lines, Self::LINESIZE);
+    }
+
+    /// Add n lines each of the given size.
+    fn add_lines_with_line_size(&mut self, lines: usize, line_size: usize) {
         let mut n = lines;
         while n > 0 {
-            writeln!(self.inner, "{}", random_chars(Self::LINESIZE)).unwrap();
+            writeln!(self.inner, "{}", random_chars(line_size)).unwrap();
             n -= 1;
         }
     }
@@ -428,6 +431,28 @@ fn test_split_lines_number() {
         .args(&["--lines", "file"])
         .fails_with_code(1)
         .stderr_only("split: invalid number of lines: 'file'\n");
+}
+
+/// Test interference between split line size and IO buffer capacity.
+/// See issue #7869.
+#[test]
+fn test_split_lines_interfere_with_io_buf_capacity() {
+    let buf_capacity = BufWriter::new(Vec::new()).capacity();
+    // We intentionally set the line size to be less than the IO write buffer
+    // capacity. This is to trigger the condition where after the first split
+    // file is written, there are still bytes left in the buffer. We then
+    // test that those bytes are written to the next split file.
+    let line_size = buf_capacity - 2;
+
+    let (at, mut ucmd) = at_and_ucmd!();
+    let name = "split_lines_interfere_with_io_buf_capacity";
+    RandomFile::new(&at, name).add_lines_with_line_size(2, line_size);
+    ucmd.args(&["-l", "1", name]).succeeds();
+
+    // Note that `lines_size` doesn't take the trailing newline into account,
+    // we add 1 for adjustment.
+    assert_eq!(at.read("xaa").len(), line_size + 1);
+    assert_eq!(at.read("xab").len(), line_size + 1);
 }
 
 /// Test short lines option with value concatenated

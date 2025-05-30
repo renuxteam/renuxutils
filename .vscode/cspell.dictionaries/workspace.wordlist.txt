@@ -20,12 +20,12 @@ exacl
 filetime
 formatteriteminfo
 fsext
-fundu
 getopts
 getrandom
 globset
 indicatif
 itertools
+langid
 lscolors
 mdbook
 memchr
@@ -47,6 +47,7 @@ termsize
 termwidth
 textwrap
 thiserror
+unic
 ureq
 walkdir
 winapi
@@ -332,6 +333,7 @@ utmpx
 uucore
 uucore_procs
 uudoc
+uufuzz
 uumain
 uutil
 uutests

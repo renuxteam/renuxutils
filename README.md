@@ -78,7 +78,7 @@ There are currently two methods to build the uutils binaries: either Cargo or
 GNU Make.
 
 > Building the full package, including all documentation, requires both Cargo
-> and Gnu Make on a Unix platform.
+> and GNU Make on a Unix platform.
 
 For either method, we first need to fetch the repository:
 
@@ -313,7 +313,7 @@ breakdown of the GNU test results of the main branch can be found
 See <https://github.com/orgs/uutils/projects/1> for the main meta bugs
 (many are missing).
 
-![Evolution over time](https://github.com/uutils/coreutils-tracking/blob/main/gnu-results.png?raw=true)
+![Evolution over time](https://github.com/uutils/coreutils-tracking/blob/main/gnu-results.svg?raw=true)
 
 </div> <!-- close oranda-hide div -->
 

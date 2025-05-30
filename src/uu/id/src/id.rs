@@ -47,7 +47,15 @@ use uucore::{format_usage, help_about, help_section, help_usage, show_error};
 
 macro_rules! cstr2cow {
     ($v:expr) => {
-        unsafe { CStr::from_ptr($v).to_string_lossy() }
+        unsafe {
+            let ptr = $v;
+            // Must be not null to call cstr2cow
+            if ptr.is_null() {
+                None
+            } else {
+                Some({ CStr::from_ptr(ptr) }.to_string_lossy())
+            }
+        }
     };
 }
 
@@ -130,7 +138,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         selinux_supported: {
             #[cfg(feature = "selinux")]
             {
-                selinux::kernel_support() != selinux::KernelSupport::Unsupported
+                uucore::selinux::is_selinux_enabled()
             }
             #[cfg(not(feature = "selinux"))]
             {
@@ -149,7 +157,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     if (state.nflag || state.rflag) && default_format && !state.cflag {
         return Err(USimpleError::new(
             1,
-            "cannot print only names or real IDs in default format",
+            "printing only names or real IDs requires -u, -g, or -G",
         ));
     }
     if state.zflag && default_format && !state.cflag {
@@ -166,13 +174,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         ));
     }
 
-    let delimiter = {
-        if state.zflag {
-            "\0".to_string()
-        } else {
-            " ".to_string()
-        }
-    };
+    let delimiter = if state.zflag { "\0" } else { " " };
     let line_ending = LineEnding::from_zero_flag(state.zflag);
 
     if state.cflag {
@@ -230,10 +232,14 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             return Ok(());
         }
 
-        let (uid, gid) = possible_pw.as_ref().map(|p| (p.uid, p.gid)).unwrap_or((
-            if state.rflag { getuid() } else { geteuid() },
-            if state.rflag { getgid() } else { getegid() },
-        ));
+        let (uid, gid) = possible_pw.as_ref().map(|p| (p.uid, p.gid)).unwrap_or({
+            let use_effective = !state.rflag && (state.uflag || state.gflag || state.gsflag);
+            if use_effective {
+                (geteuid(), getegid())
+            } else {
+                (getuid(), getgid())
+            }
+        });
         state.ids = Some(Ids {
             uid,
             gid,
@@ -295,7 +301,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                         }
                     })
                     .collect::<Vec<_>>()
-                    .join(&delimiter),
+                    .join(delimiter),
                 // NOTE: this is necessary to pass GNU's "tests/id/zero.sh":
                 if state.zflag && state.user_specified && users.len() > 1 {
                     "\0"
@@ -451,8 +457,8 @@ fn pretty(possible_pw: Option<Passwd>) {
         let login = cstr2cow!(getlogin().cast_const());
         let rid = getuid();
         if let Ok(p) = Passwd::locate(rid) {
-            if login == p.name {
-                println!("login\t{login}");
+            if let Some(user_name) = login {
+                println!("login\t{user_name}");
             }
             println!("uid\t{}", p.name);
         } else {

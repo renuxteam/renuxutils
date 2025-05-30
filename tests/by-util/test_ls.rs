@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 // spell-checker:ignore (words) READMECAREFULLY birthtime doesntexist oneline somebackup lrwx somefile somegroup somehiddenbackup somehiddenfile tabsize aaaaaaaa bbbb cccc dddddddd ncccc neee naaaaa nbcdef nfffff dired subdired tmpfs mdir COLORTERM mexe bcdef mfoo
-// spell-checker:ignore (words) fakeroot setcap
+// spell-checker:ignore (words) fakeroot setcap drwxr
 #![allow(
     clippy::similar_names,
     clippy::too_many_lines,
@@ -19,8 +19,6 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(all(unix, feature = "chmod"))]
-use std::os::unix::io::IntoRawFd;
 use std::path::Path;
 #[cfg(not(windows))]
 use std::path::PathBuf;
@@ -544,50 +542,53 @@ fn test_ls_io_errors() {
 
     #[cfg(unix)]
     {
+        use std::os::fd::AsRawFd;
+
         at.touch("some-dir4/bad-fd.txt");
-        let fd1 = at.open("some-dir4/bad-fd.txt").into_raw_fd();
-        let fd2 = dup(dbg!(fd1)).unwrap();
+        let fd1 = at.open("some-dir4/bad-fd.txt");
+        let fd2 = dup(dbg!(&fd1)).unwrap();
         close(fd1).unwrap();
 
         // on the mac and in certain Linux containers bad fds are typed as dirs,
         // however sometimes bad fds are typed as links and directory entry on links won't fail
-        if PathBuf::from(format!("/dev/fd/{fd2}")).is_dir() {
+        if PathBuf::from(format!("/dev/fd/{}", fd2.as_raw_fd())).is_dir() {
             scene
                 .ucmd()
                 .arg("-alR")
-                .arg(format!("/dev/fd/{fd2}"))
+                .arg(format!("/dev/fd/{}", fd2.as_raw_fd()))
                 .fails()
                 .stderr_contains(format!(
-                    "cannot open directory '/dev/fd/{fd2}': Bad file descriptor"
+                    "cannot open directory '/dev/fd/{}': Bad file descriptor",
+                    fd2.as_raw_fd()
                 ))
-                .stdout_does_not_contain(format!("{fd2}:\n"));
+                .stdout_does_not_contain(format!("{}:\n", fd2.as_raw_fd()));
 
             scene
                 .ucmd()
                 .arg("-RiL")
-                .arg(format!("/dev/fd/{fd2}"))
+                .arg(format!("/dev/fd/{}", fd2.as_raw_fd()))
                 .fails()
-                .stderr_contains(format!("cannot open directory '/dev/fd/{fd2}': Bad file descriptor"))
+                .stderr_contains(format!("cannot open directory '/dev/fd/{}': Bad file descriptor", fd2.as_raw_fd()))
                 // don't double print bad fd errors
-                .stderr_does_not_contain(format!("ls: cannot open directory '/dev/fd/{fd2}': Bad file descriptor\nls: cannot open directory '/dev/fd/{fd2}': Bad file descriptor"));
+                .stderr_does_not_contain(format!("ls: cannot open directory '/dev/fd/{0}': Bad file descriptor\nls: cannot open directory '/dev/fd/{0}': Bad file descriptor", fd2.as_raw_fd()));
         } else {
             scene
                 .ucmd()
                 .arg("-alR")
-                .arg(format!("/dev/fd/{fd2}"))
+                .arg(format!("/dev/fd/{}", fd2.as_raw_fd()))
                 .succeeds();
 
             scene
                 .ucmd()
                 .arg("-RiL")
-                .arg(format!("/dev/fd/{fd2}"))
+                .arg(format!("/dev/fd/{}", fd2.as_raw_fd()))
                 .succeeds();
         }
 
         scene
             .ucmd()
             .arg("-alL")
-            .arg(format!("/dev/fd/{fd2}"))
+            .arg(format!("/dev/fd/{}", fd2.as_raw_fd()))
             .succeeds();
 
         let _ = close(fd2);
@@ -4489,6 +4490,7 @@ fn test_ls_perm_io_errors() {
     let at = &scene.fixtures;
     at.mkdir("d");
     at.symlink_file("/", "d/s");
+    at.touch("d/f");
 
     scene.ccmd("chmod").arg("600").arg("d").succeeds();
 
@@ -4497,7 +4499,10 @@ fn test_ls_perm_io_errors() {
         .arg("-l")
         .arg("d")
         .fails_with_code(1)
-        .stderr_contains("Permission denied");
+        .stderr_contains("Permission denied")
+        .stdout_contains("total 0")
+        .stdout_contains("l????????? ? ? ? ?            ? s")
+        .stdout_contains("-????????? ? ? ? ?            ? f");
 }
 
 #[test]
@@ -5313,14 +5318,15 @@ fn test_acl_display() {
 
     let scene = TestScenario::new(util_name!());
     let at = &scene.fixtures;
-    let path = "a42";
-    at.mkdir(path);
 
-    let path = at.plus_as_string(path);
+    at.mkdir("with_acl");
+    let path_with_acl = at.plus_as_string("with_acl");
+    at.mkdir("without_acl");
+
     // calling the command directly. xattr requires some dev packages to be installed
     // and it adds a complex dependency just for a test
     match Command::new("setfacl")
-        .args(["-d", "-m", "group::rwx", &path])
+        .args(["-d", "-m", "group::rwx", &path_with_acl])
         .status()
         .map(|status| status.code())
     {
@@ -5335,11 +5341,19 @@ fn test_acl_display() {
         }
     }
 
+    // Expected output (we just look for `+` presence and absence in the first column):
+    // ...
+    // drwxr-xr-x+  2 user group   40 Apr 21 12:44 with_acl
+    // drwxr-xr-x  2 user group   40 Apr 21 12:44 without_acl
+    let re_with_acl = Regex::new(r"[a-z-]*\+ .*with_acl").unwrap();
+    let re_without_acl = Regex::new(r"[a-z-]* .*without_acl").unwrap();
+
     scene
         .ucmd()
-        .args(&["-lda", &path])
+        .args(&["-la", &at.as_string()])
         .succeeds()
-        .stdout_contains("+");
+        .stdout_matches(&re_with_acl)
+        .stdout_matches(&re_without_acl);
 }
 
 // Make sure that "ls --color" correctly applies color "normal" to text and
@@ -5689,6 +5703,16 @@ fn test_time_style_timezone_name() {
     at.touch("f");
     ucmd.env("TZ", "UTC0")
         .args(&["-l", "--time-style=+%Z"])
+        .succeeds()
+        .stdout_matches(&re_custom_format);
+}
+
+#[test]
+fn test_unknown_format_specifier() {
+    let re_custom_format = Regex::new(r"[a-z-]* \d* [\w.]* [\w.]* \d+ \d{4} %0 \d{9} f\n").unwrap();
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.touch("f");
+    ucmd.args(&["-l", "--time-style=+%Y %0 %N"])
         .succeeds()
         .stdout_matches(&re_custom_format);
 }

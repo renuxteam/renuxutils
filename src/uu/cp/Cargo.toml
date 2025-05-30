@@ -2,13 +2,9 @@
 name = "uu_cp"
 description = "cp ~ (uutils) copy SOURCE to DESTINATION"
 repository = "https://github.com/uutils/coreutils/tree/main/src/uu/cp"
-authors = [
-  "Jordy Dickinson <jordy.dickinson@gmail.com>",
-  "Joshua S. Miller <jsmiller@uchicago.edu>",
-  "uutils developers",
-]
-license.workspace = true
 version.workspace = true
+authors.workspace = true
+license.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -51,5 +47,5 @@ name = "cp"
 path = "src/main.rs"
 
 [features]
-feat_selinux = ["selinux"]
+feat_selinux = ["selinux", "uucore/selinux"]
 feat_acl = ["exacl"]

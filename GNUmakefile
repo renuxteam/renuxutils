@@ -5,6 +5,7 @@ PROFILE         ?= debug
 MULTICALL       ?= n
 COMPLETIONS     ?= y
 MANPAGES        ?= y
+LOCALES         ?= y
 INSTALL         ?= install
 ifneq (,$(filter install, $(MAKECMDGOALS)))
 override PROFILE:=release
@@ -127,6 +128,7 @@ PROGS       := \
 	sleep \
 	sort \
 	split \
+	stty \
 	sum \
 	sync \
 	tac \
@@ -267,8 +269,8 @@ TEST_NO_FAIL_FAST :=--no-fail-fast
 TEST_SPEC_FEATURE := test_unimplemented
 else ifeq ($(SELINUX_ENABLED),1)
 TEST_NO_FAIL_FAST :=
-TEST_SPEC_FEATURE := feat_selinux
-BUILD_SPEC_FEATURE := feat_selinux
+TEST_SPEC_FEATURE := selinux
+BUILD_SPEC_FEATURE := selinux
 endif
 
 define TEST_BUSYBOX
@@ -299,7 +301,7 @@ else
 endif
 endif
 
-build-coreutils:
+build-coreutils: locales
 	${CARGO} build ${CARGOFLAGS} --features "${EXES} $(BUILD_SPEC_FEATURE)" ${PROFILE_CMD} --no-default-features
 
 build: build-coreutils build-pkgs
@@ -395,7 +397,32 @@ else
 install-completions:
 endif
 
-install: build install-manpages install-completions
+ifeq ($(LOCALES),y)
+locales:
+	$(foreach prog, $(INSTALLEES), \
+		if [ -d "$(BASEDIR)/src/uu/$(prog)/locales" ]; then \
+			mkdir -p "$(BUILDDIR)/locales/$(prog)"; \
+			for locale_file in "$(BASEDIR)"/src/uu/$(prog)/locales/*.ftl; do \
+				$(INSTALL) -v "$$locale_file" "$(BUILDDIR)/locales/$(prog)/"; \
+			done; \
+		fi $(newline) \
+	)
+
+
+install-locales:
+	$(foreach prog, $(INSTALLEES), \
+		if [ -d "$(BASEDIR)/src/uu/$(prog)/locales" ]; then \
+			mkdir -p "$(DESTDIR)$(DATAROOTDIR)/locales/$(prog)"; \
+			for locale_file in "$(BASEDIR)"/src/uu/$(prog)/locales/*.ftl; do \
+				$(INSTALL) -v "$$locale_file" "$(DESTDIR)$(DATAROOTDIR)/locales/$(prog)/"; \
+			done; \
+		fi $(newline) \
+	)
+else
+install-locales:
+endif
+
+install: build install-manpages install-completions install-locales
 	mkdir -p $(INSTALLDIR_BIN)
 ifeq (${MULTICALL}, y)
 	$(INSTALL) $(BUILDDIR)/coreutils $(INSTALLDIR_BIN)/$(PROG_PREFIX)coreutils

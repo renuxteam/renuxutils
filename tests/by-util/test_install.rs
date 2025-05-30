@@ -2,7 +2,7 @@
 //
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
-// spell-checker:ignore (words) helloworld nodir objdump n'source
+// spell-checker:ignore (words) helloworld nodir objdump n'source nconfined
 
 #[cfg(not(target_os = "openbsd"))]
 use filetime::FileTime;
@@ -68,24 +68,6 @@ fn test_install_failing_not_dir() {
         .arg(file3)
         .fails()
         .stderr_contains("not a directory");
-}
-
-#[test]
-fn test_install_unimplemented_arg() {
-    let (at, mut ucmd) = at_and_ucmd!();
-    let dir = "target_dir";
-    let file = "source_file";
-    let context_arg = "--context";
-
-    at.touch(file);
-    at.mkdir(dir);
-    ucmd.arg(context_arg)
-        .arg(file)
-        .arg(dir)
-        .fails()
-        .stderr_contains("Unimplemented");
-
-    assert!(!at.file_exists(format!("{dir}/{file}")));
 }
 
 #[test]
@@ -1763,4 +1745,275 @@ fn test_install_from_stdin() {
 
     assert!(at.file_exists(target));
     assert_eq!(at.read(target), test_string);
+}
+
+#[test]
+fn test_install_failing_copy_file_to_target_contain_subdir_with_same_name() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    let file = "file";
+    let dir1 = "dir1";
+
+    at.touch(file);
+    at.mkdir_all(&format!("{dir1}/{file}"));
+    ucmd.arg(file)
+        .arg(dir1)
+        .fails()
+        .stderr_contains("cannot overwrite directory");
+}
+
+#[test]
+fn test_install_same_file() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    let file = "file";
+
+    at.touch(file);
+    ucmd.arg(file)
+        .arg(".")
+        .fails()
+        .stderr_contains("'file' and './file' are the same file");
+}
+
+#[test]
+fn test_install_symlink_same_file() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    let file = "file";
+    let target_dir = "target_dir";
+    let target_link = "target_link";
+
+    at.mkdir(target_dir);
+    at.touch(format!("{target_dir}/{file}"));
+    at.symlink_file(target_dir, target_link);
+    ucmd.arg(format!("{target_dir}/{file}"))
+        .arg(target_link)
+        .fails()
+        .stderr_contains(format!(
+            "'{target_dir}/{file}' and '{target_link}/{file}' are the same file"
+        ));
+}
+
+#[test]
+fn test_install_no_target_directory_failing_cannot_overwrite() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let file = "file";
+    let dir = "dir";
+
+    at.touch(file);
+    at.mkdir(dir);
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(file)
+        .arg(dir)
+        .fails()
+        .stderr_contains("cannot overwrite directory 'dir' with non-directory");
+
+    assert!(!at.dir_exists("dir/file"));
+}
+
+#[test]
+fn test_install_no_target_directory_failing_omitting_directory() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let dir1 = "dir1";
+    let dir2 = "dir2";
+
+    at.mkdir(dir1);
+    at.mkdir(dir2);
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(dir1)
+        .arg(dir2)
+        .fails()
+        .stderr_contains("omitting directory 'dir1'");
+}
+
+#[test]
+fn test_install_no_target_directory_creating_leading_dirs_with_single_source_and_target_dir() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+
+    let source1 = "file";
+    let target_dir = "missing_target_dir/";
+
+    at.touch(source1);
+
+    // installing a single file into a missing directory will fail, when -D is used w/o -t parameter
+    scene
+        .ucmd()
+        .arg("-TD")
+        .arg(source1)
+        .arg(at.plus(target_dir))
+        .fails()
+        .stderr_contains("missing_target_dir/' is not a directory");
+
+    assert!(!at.dir_exists(target_dir));
+}
+
+#[test]
+fn test_install_no_target_directory_failing_combine_with_target_directory() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let file = "file";
+    let dir1 = "dir1";
+
+    at.touch(file);
+    at.mkdir(dir1);
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(file)
+        .arg("-t")
+        .arg(dir1)
+        .fails()
+        .stderr_contains(
+            "Options --target-directory and --no-target-directory are mutually exclusive",
+        );
+}
+
+#[test]
+fn test_install_no_target_directory_failing_usage_with_target_directory() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let file = "file";
+
+    at.touch(file);
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(file)
+        .arg("-t")
+        .fails()
+        .stderr_contains(
+            "a value is required for '--target-directory <DIRECTORY>' but none was supplied",
+        )
+        .stderr_contains("For more information, try '--help'");
+}
+
+#[test]
+fn test_install_no_target_multiple_sources_and_target_dir() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+
+    let file1 = "file1";
+    let file2 = "file2";
+    let dir1 = "dir1";
+    let dir2 = "dir2";
+
+    at.touch(file1);
+    at.touch(file2);
+    at.mkdir(dir1);
+    at.mkdir(dir2);
+
+    // installing multiple files into a missing directory will fail, when -D is used w/o -t parameter
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(file1)
+        .arg(file2)
+        .arg(dir1)
+        .fails()
+        .stderr_contains("extra operand 'dir1'")
+        .stderr_contains("[OPTION]... [FILE]...");
+
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(file1)
+        .arg(file2)
+        .arg(dir1)
+        .arg(dir2)
+        .fails()
+        .stderr_contains("extra operand 'dir1'")
+        .stderr_contains("[OPTION]... [FILE]...");
+}
+
+#[test]
+fn test_install_no_target_basic() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    let file = "file";
+    let dir = "dir";
+
+    at.touch(file);
+    at.mkdir(dir);
+    ucmd.arg("-T")
+        .arg(file)
+        .arg(format!("{dir}/{file}"))
+        .succeeds()
+        .no_stderr();
+
+    assert!(at.file_exists(file));
+    assert!(at.file_exists(format!("{dir}/{file}")));
+}
+
+#[test]
+#[cfg(feature = "feat_selinux")]
+fn test_selinux() {
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let src = "orig";
+    at.touch(src);
+
+    let dest = "orig.2";
+
+    let args = ["-Z", "--context=unconfined_u:object_r:user_tmp_t:s0"];
+    for arg in args {
+        new_ucmd!()
+            .arg(arg)
+            .arg("-v")
+            .arg(at.plus_as_string(src))
+            .arg(at.plus_as_string(dest))
+            .succeeds()
+            .stdout_contains("orig' -> '");
+
+        let getfattr_output = Command::new("getfattr")
+            .arg(at.plus_as_string(dest))
+            .arg("-n")
+            .arg("security.selinux")
+            .output()
+            .expect("Failed to run `getfattr` on the destination file");
+        println!("{:?}", getfattr_output);
+        assert!(
+            getfattr_output.status.success(),
+            "getfattr did not run successfully: {}",
+            String::from_utf8_lossy(&getfattr_output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&getfattr_output.stdout);
+        assert!(
+            stdout.contains("unconfined_u"),
+            "Expected 'foo' not found in getfattr output:\n{stdout}"
+        );
+        at.remove(&at.plus_as_string(dest));
+    }
+}
+
+#[test]
+#[cfg(feature = "feat_selinux")]
+fn test_selinux_invalid_args() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let src = "orig";
+    at.touch(src);
+    let dest = "orig.2";
+
+    let args = [
+        "--context=a",
+        "--context=unconfined_u:object_r:user_tmp_t:s0:a",
+        "--context=nconfined_u:object_r:user_tmp_t:s0",
+    ];
+    for arg in args {
+        new_ucmd!()
+            .arg(arg)
+            .arg("-v")
+            .arg(at.plus_as_string(src))
+            .arg(at.plus_as_string(dest))
+            .fails()
+            .stderr_contains("failed to set default file creation");
+
+        at.remove(&at.plus_as_string(dest));
+    }
 }
